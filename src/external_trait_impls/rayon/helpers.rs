@@ -1,7 +1,7 @@
 use alloc::collections::LinkedList;
 use alloc::vec::Vec;
 
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon_dep::iter::{IntoParallelIterator, ParallelIterator};
 
 /// Helper for collecting parallel iterators to an intermediary
 pub(super) fn collect<I: IntoParallelIterator>(iter: I) -> (LinkedList<Vec<I::Item>>, usize) {

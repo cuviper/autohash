@@ -1,19 +1,20 @@
-//! This crate is a Rust port of Google's high-performance [SwissTable] hash
-//! map, adapted to make it a drop-in replacement for Rust's standard `HashMap`
-//! and `HashSet` types.
+//! This crate provides [`AutoHashMap`] and [`AutoHashSet`] where the keys are
+//! self-hashed. The implementation is built on `RawTable` from [`hashbrown`].
 //!
-//! The original C++ version of [SwissTable] can be found [here], and this
-//! [CppCon talk] gives an overview of how the algorithm works.
+//! Keys implement the [`AutoHash`] trait for getting their hash value, instead of
+//! using a generic `Hasher` in the table with `Hash` keys. This may be useful when
+//! the type is already hash-like or has a saved hash, or if you don't want your
+//! type to implement `Hash` for some reason.
 //!
-//! [SwissTable]: https://abseil.io/blog/20180927-swisstables
-//! [here]: https://github.com/abseil/abseil-cpp/blob/master/absl/container/internal/raw_hash_set.h
-//! [CppCon talk]: https://www.youtube.com/watch?v=ncHmEUmJZf4
+//! Example key types are included in the [`wrappers`] module.
+//!
+//! [`AutoHashMap`]: map/struct.AutoHashMap.html
+//! [`AutoHashSet`]: set/struct.AutoHashSet.html
+//! [`AutoHash`]: trait.AutoHash.html
+//! [`hashbrown`]: https://crates.io/crates/hashbrown
+//! [`wrappers`]: wrappers/index.html
 
 #![no_std]
-#![cfg_attr(
-    feature = "nightly",
-    feature(test, core_intrinsics, dropck_eyepatch, min_specialization, extend_one)
-)]
 #![allow(
     clippy::doc_markdown,
     clippy::module_name_repetitions,
@@ -23,90 +24,81 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-#[cfg(test)]
-#[macro_use]
-extern crate std;
+// #[cfg(test)]
+// #[macro_use]
+// extern crate std;
 
-#[cfg_attr(test, macro_use)]
+// #[cfg_attr(test, macro_use)]
 extern crate alloc;
 
 #[cfg(feature = "nightly")]
 #[cfg(doctest)]
 doc_comment::doctest!("../README.md");
 
-#[macro_use]
-mod macros;
-
-#[cfg(feature = "raw")]
-/// Experimental and unsafe `RawTable` API. This module is only available if the
-/// `raw` feature is enabled.
-pub mod raw {
-    // The RawTable API is still experimental and is not properly documented yet.
-    #[allow(missing_docs)]
-    #[path = "mod.rs"]
-    mod inner;
-    pub use inner::*;
-
-    #[cfg(feature = "rayon")]
-    pub mod rayon {
-        pub use crate::external_trait_impls::rayon::raw::*;
-    }
-}
-#[cfg(not(feature = "raw"))]
-mod raw;
-
 mod external_trait_impls;
-mod map;
-#[cfg(feature = "rustc-internal-api")]
-mod rustc_entry;
-mod scopeguard;
-mod set;
 
-pub mod hash_map {
-    //! A hash map implemented with quadratic probing and SIMD lookup.
-    pub use crate::map::*;
+pub mod map;
+pub mod set;
+pub mod wrappers;
 
-    #[cfg(feature = "rustc-internal-api")]
-    pub use crate::rustc_entry::*;
+pub use crate::map::AutoHashMap;
+pub use crate::set::AutoHashSet;
 
-    #[cfg(feature = "rayon")]
-    /// [rayon]-based parallel iterator types for hash maps.
-    /// You will rarely need to interact with it directly unless you have need
-    /// to name one of the iterator types.
-    ///
-    /// [rayon]: https://docs.rs/rayon/1.0/rayon
-    pub mod rayon {
-        pub use crate::external_trait_impls::rayon::map::*;
-    }
+pub use hashbrown::TryReserveError;
+
+/// A self-hashed type.
+///
+/// Types implementing `AutoHash` are able to return their hash value independently.
+///
+/// If two values are equal, their hashes must also be equal, even through `Borrow`.
+pub trait AutoHash {
+    /// Return the hash for this value.
+    fn get_hash(&self) -> u64;
 }
-pub mod hash_set {
-    //! A hash set implemented as a `HashMap` where the value is `()`.
-    pub use crate::set::*;
 
-    #[cfg(feature = "rayon")]
-    /// [rayon]-based parallel iterator types for hash sets.
-    /// You will rarely need to interact with it directly unless you have need
-    /// to name one of the iterator types.
-    ///
-    /// [rayon]: https://docs.rs/rayon/1.0/rayon
-    pub mod rayon {
-        pub use crate::external_trait_impls::rayon::set::*;
+// The forwarding impls below match the standard library's `impl<T> Borrow<T>`.
+
+impl<T: AutoHash + ?Sized> AutoHash for &'_ T {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(*self)
     }
 }
 
-pub use crate::map::HashMap;
-pub use crate::set::HashSet;
+impl<T: AutoHash + ?Sized> AutoHash for &'_ mut T {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(*self)
+    }
+}
 
-/// The error type for `try_reserve` methods.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TryReserveError {
-    /// Error due to the computed capacity exceeding the collection's maximum
-    /// (usually `isize::MAX` bytes).
-    CapacityOverflow,
+impl<T> AutoHash for alloc::borrow::Cow<'_, T>
+where
+    T: AutoHash + alloc::borrow::ToOwned + ?Sized,
+{
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(&**self)
+    }
+}
 
-    /// The memory allocator returned an error
-    AllocError {
-        /// The layout of the allocation request that failed.
-        layout: alloc::alloc::Layout,
-    },
+impl<T: AutoHash + ?Sized> AutoHash for alloc::boxed::Box<T> {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(&**self)
+    }
+}
+
+impl<T: AutoHash + ?Sized> AutoHash for alloc::rc::Rc<T> {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(&**self)
+    }
+}
+
+impl<T: AutoHash + ?Sized> AutoHash for alloc::sync::Arc<T> {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        T::get_hash(&**self)
+    }
 }

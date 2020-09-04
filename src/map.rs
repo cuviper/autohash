@@ -1,20 +1,14 @@
-use crate::raw::{Bucket, RawDrain, RawIntoIter, RawIter, RawTable};
+//! A hash map implemented with quadratic probing and SIMD lookup.
+
+use crate::AutoHash;
 use crate::TryReserveError;
 use core::borrow::Borrow;
 use core::fmt::{self, Debug};
-use core::hash::{BuildHasher, Hash, Hasher};
 use core::iter::{FromIterator, FusedIterator};
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::Index;
-
-/// Default hasher for `HashMap`.
-#[cfg(feature = "ahash")]
-pub type DefaultHashBuilder = ahash::RandomState;
-
-/// Dummy default hasher for `HashMap`.
-#[cfg(not(feature = "ahash"))]
-pub enum DefaultHashBuilder {}
+use hashbrown::raw::{Bucket, RawDrain, RawIntoIter, RawIter, RawTable};
 
 /// A hash map implemented with quadratic probing and SIMD lookup.
 ///
@@ -23,7 +17,7 @@ pub enum DefaultHashBuilder {}
 /// fast for all types of keys, but this algorithm will typically *not* protect
 /// against attacks such as HashDoS.
 ///
-/// The hashing algorithm can be replaced on a per-`HashMap` basis using the
+/// The hashing algorithm can be replaced on a per-`AutoHashMap` basis using the
 /// [`default`], [`with_hasher`], and [`with_capacity_and_hasher`] methods. Many
 /// alternative algorithms are available on crates.io, such as the [`fnv`] crate.
 ///
@@ -45,13 +39,13 @@ pub enum DefaultHashBuilder {}
 ///
 /// It is also a logic error for the [`Hash`] implementation of a key to panic.
 /// This is generally only possible if the trait is implemented manually. If a
-/// panic does occur then the contents of the `HashMap` may become corrupted and
+/// panic does occur then the contents of the `AutoHashMap` may become corrupted and
 /// some items may be dropped from the table.
 ///
 /// # Examples
 ///
 /// ```
-/// use hashbrown::HashMap;
+/// use hashedmap::AutoHashMap;
 ///
 /// // Type inference lets us omit an explicit type signature (which
 /// // would be `HashMap<String, String>` in this example).
@@ -176,7 +170,7 @@ pub enum DefaultHashBuilder {}
 /// }
 /// ```
 ///
-/// A `HashMap` with fixed list of elements can be initialized from an array:
+/// A `AutoHashMap` with fixed list of elements can be initialized from an array:
 ///
 /// ```
 /// use hashbrown::HashMap;
@@ -185,37 +179,29 @@ pub enum DefaultHashBuilder {}
 ///     .iter().cloned().collect();
 /// // use the values stored in map
 /// ```
-pub struct HashMap<K, V, S = DefaultHashBuilder> {
-    pub(crate) hash_builder: S,
+pub struct AutoHashMap<K, V> {
     pub(crate) table: RawTable<(K, V)>,
 }
 
-impl<K: Clone, V: Clone, S: Clone> Clone for HashMap<K, V, S> {
+impl<K: Clone, V: Clone> Clone for AutoHashMap<K, V> {
     fn clone(&self) -> Self {
-        HashMap {
-            hash_builder: self.hash_builder.clone(),
+        AutoHashMap {
             table: self.table.clone(),
         }
     }
 
     fn clone_from(&mut self, source: &Self) {
         self.table.clone_from(&source.table);
-
-        // Update hash_builder only if we successfully cloned all elements.
-        self.hash_builder.clone_from(&source.hash_builder);
     }
 }
 
-#[cfg_attr(feature = "inline-more", inline)]
-pub(crate) fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
-    let mut state = hash_builder.build_hasher();
-    val.hash(&mut state);
-    state.finish()
+#[inline]
+pub(crate) fn entry_hash<K: AutoHash, V>(&(ref key, _): &(K, V)) -> u64 {
+    key.get_hash()
 }
 
-#[cfg(feature = "ahash")]
-impl<K, V> HashMap<K, V, DefaultHashBuilder> {
-    /// Creates an empty `HashMap`.
+impl<K, V> AutoHashMap<K, V> {
+    /// Creates an empty `AutoHashMap`.
     ///
     /// The hash map is initially created with a capacity of 0, so it will not allocate until it
     /// is first inserted into.
@@ -228,10 +214,12 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            table: RawTable::new(),
+        }
     }
 
-    /// Creates an empty `HashMap` with the specified capacity.
+    /// Creates an empty `AutoHashMap` with the specified capacity.
     ///
     /// The hash map will be able to hold at least `capacity` elements without
     /// reallocating. If `capacity` is 0, the hash map will not allocate.
@@ -244,100 +232,14 @@ impl<K, V> HashMap<K, V, DefaultHashBuilder> {
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_capacity_and_hasher(capacity, DefaultHashBuilder::default())
-    }
-}
-
-impl<K, V, S> HashMap<K, V, S> {
-    /// Creates an empty `HashMap` which will use the given hash builder to hash
-    /// keys.
-    ///
-    /// The created map has the default initial capacity.
-    ///
-    /// Warning: `hash_builder` is normally randomly generated, and
-    /// is designed to allow HashMaps to be resistant to attacks that
-    /// cause many collisions and very poor performance. Setting it
-    /// manually using this function can expose a DoS attack vector.
-    ///
-    /// The `hash_builder` passed should implement the [`BuildHasher`] trait for
-    /// the HashMap to be useful, see its documentation for details.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hashbrown::HashMap;
-    /// use hashbrown::hash_map::DefaultHashBuilder;
-    ///
-    /// let s = DefaultHashBuilder::default();
-    /// let mut map = HashMap::with_hasher(s);
-    /// map.insert(1, 2);
-    /// ```
-    ///
-    /// [`BuildHasher`]: ../../std/hash/trait.BuildHasher.html
-    #[cfg_attr(feature = "inline-more", inline)]
-    pub const fn with_hasher(hash_builder: S) -> Self {
         Self {
-            hash_builder,
-            table: RawTable::new(),
-        }
-    }
-
-    /// Creates an empty `HashMap` with the specified capacity, using `hash_builder`
-    /// to hash the keys.
-    ///
-    /// The hash map will be able to hold at least `capacity` elements without
-    /// reallocating. If `capacity` is 0, the hash map will not allocate.
-    ///
-    /// Warning: `hash_builder` is normally randomly generated, and
-    /// is designed to allow HashMaps to be resistant to attacks that
-    /// cause many collisions and very poor performance. Setting it
-    /// manually using this function can expose a DoS attack vector.
-    ///
-    /// The `hash_builder` passed should implement the [`BuildHasher`] trait for
-    /// the HashMap to be useful, see its documentation for details.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hashbrown::HashMap;
-    /// use hashbrown::hash_map::DefaultHashBuilder;
-    ///
-    /// let s = DefaultHashBuilder::default();
-    /// let mut map = HashMap::with_capacity_and_hasher(10, s);
-    /// map.insert(1, 2);
-    /// ```
-    ///
-    /// [`BuildHasher`]: ../../std/hash/trait.BuildHasher.html
-    #[cfg_attr(feature = "inline-more", inline)]
-    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
-        Self {
-            hash_builder,
             table: RawTable::with_capacity(capacity),
         }
     }
 
-    /// Returns a reference to the map's [`BuildHasher`].
-    ///
-    /// [`BuildHasher`]: https://doc.rust-lang.org/std/hash/trait.BuildHasher.html
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use hashbrown::HashMap;
-    /// use hashbrown::hash_map::DefaultHashBuilder;
-    ///
-    /// let hasher = DefaultHashBuilder::default();
-    /// let map: HashMap<i32, i32> = HashMap::with_hasher(hasher);
-    /// let hasher: &DefaultHashBuilder = map.hasher();
-    /// ```
-    #[cfg_attr(feature = "inline-more", inline)]
-    pub fn hasher(&self) -> &S {
-        &self.hash_builder
-    }
-
     /// Returns the number of elements the map can hold without reallocating.
     ///
-    /// This number is a lower bound; the `HashMap<K, V>` might be able to hold
+    /// This number is a lower bound; the `AutoHashMap<K, V>` might be able to hold
     /// more, but is guaranteed to be able to hold at least this many.
     ///
     /// # Examples
@@ -487,6 +389,7 @@ impl<K, V, S> HashMap<K, V, S> {
         }
     }
 
+    #[cfg(FIXME)]
     #[cfg(test)]
     #[cfg_attr(feature = "inline-more", inline)]
     fn raw_capacity(&self) -> usize {
@@ -642,13 +545,12 @@ impl<K, V, S> HashMap<K, V, S> {
     }
 }
 
-impl<K, V, S> HashMap<K, V, S>
+impl<K, V> AutoHashMap<K, V>
 where
-    K: Eq + Hash,
-    S: BuildHasher,
+    K: Eq + AutoHash,
 {
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the `HashMap`. The collection may reserve more space to avoid
+    /// in the `AutoHashMap`. The collection may reserve more space to avoid
     /// frequent reallocations.
     ///
     /// # Panics
@@ -666,9 +568,7 @@ where
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn reserve(&mut self, additional: usize) {
-        let hash_builder = &self.hash_builder;
-        self.table
-            .reserve(additional, |x| make_hash(hash_builder, &x.0));
+        self.table.reserve(additional, entry_hash);
     }
 
     /// Tries to reserve capacity for at least `additional` more elements to be inserted
@@ -689,9 +589,7 @@ where
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
-        let hash_builder = &self.hash_builder;
-        self.table
-            .try_reserve(additional, |x| make_hash(hash_builder, &x.0))
+        self.table.try_reserve(additional, entry_hash)
     }
 
     /// Shrinks the capacity of the map as much as possible. It will drop
@@ -712,8 +610,7 @@ where
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn shrink_to_fit(&mut self) {
-        let hash_builder = &self.hash_builder;
-        self.table.shrink_to(0, |x| make_hash(hash_builder, &x.0));
+        self.table.shrink_to(0, entry_hash);
     }
 
     /// Shrinks the capacity of the map with a lower limit. It will drop
@@ -741,9 +638,7 @@ where
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn shrink_to(&mut self, min_capacity: usize) {
-        let hash_builder = &self.hash_builder;
-        self.table
-            .shrink_to(min_capacity, |x| make_hash(hash_builder, &x.0));
+        self.table.shrink_to(min_capacity, entry_hash);
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -766,8 +661,8 @@ where
     /// assert_eq!(letters.get(&'y'), None);
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S> {
-        let hash = make_hash(&self.hash_builder, &key);
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+        let hash = key.get_hash();
         if let Some(elem) = self.table.find(hash, |q| q.0.eq(&key)) {
             Entry::Occupied(OccupiedEntry {
                 hash,
@@ -807,7 +702,7 @@ where
     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
         match self.get_key_value(k) {
@@ -839,11 +734,10 @@ where
     pub fn get_key_value<Q: ?Sized>(&self, k: &Q) -> Option<(&K, &V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
-        let hash = make_hash(&self.hash_builder, k);
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(hash, |x| k.eq(x.0.borrow())) {
+        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
             Some(item) => unsafe {
                 let &(ref key, ref value) = item.as_ref();
                 Some((key, value))
@@ -879,11 +773,10 @@ where
     pub fn get_key_value_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<(&K, &mut V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
-        let hash = make_hash(&self.hash_builder, k);
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(hash, |x| k.eq(x.0.borrow())) {
+        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
             Some(item) => unsafe {
                 let &mut (ref key, ref mut value) = item.as_mut();
                 Some((key, value))
@@ -915,7 +808,7 @@ where
     pub fn contains_key<Q: ?Sized>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
         self.get(k).is_some()
     }
@@ -945,11 +838,10 @@ where
     pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
-        let hash = make_hash(&self.hash_builder, k);
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(hash, |x| k.eq(x.0.borrow())) {
+        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
             Some(item) => Some(unsafe { &mut item.as_mut().1 }),
             None => None,
         }
@@ -983,13 +875,11 @@ where
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         unsafe {
-            let hash = make_hash(&self.hash_builder, &k);
+            let hash = k.get_hash();
             if let Some(item) = self.table.find(hash, |x| k.eq(&x.0)) {
                 Some(mem::replace(&mut item.as_mut().1, v))
             } else {
-                let hash_builder = &self.hash_builder;
-                self.table
-                    .insert(hash, (k, v), |x| make_hash(hash_builder, &x.0));
+                self.table.insert(hash, (k, v), entry_hash);
                 None
             }
         }
@@ -1019,7 +909,7 @@ where
     pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
         match self.remove_entry(k) {
@@ -1052,11 +942,10 @@ where
     pub fn remove_entry<Q: ?Sized>(&mut self, k: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
         unsafe {
-            let hash = make_hash(&self.hash_builder, &k);
-            if let Some(item) = self.table.find(hash, |x| k.eq(x.0.borrow())) {
+            if let Some(item) = self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
                 Some(self.table.remove(item))
             } else {
                 None
@@ -1065,7 +954,7 @@ where
     }
 }
 
-impl<K, V, S> HashMap<K, V, S> {
+impl<K, V> AutoHashMap<K, V> {
     /// Creates a raw entry builder for the HashMap.
     ///
     /// Raw entries provide the lowest level of control for searching and
@@ -1098,7 +987,7 @@ impl<K, V, S> HashMap<K, V, S> {
     /// acting erratically, with two keys randomly masking each other. Implementations
     /// are free to assume this doesn't happen (within the limits of memory-safety).
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn raw_entry_mut(&mut self) -> RawEntryBuilderMut<'_, K, V, S> {
+    pub fn raw_entry_mut(&mut self) -> RawEntryBuilderMut<'_, K, V> {
         RawEntryBuilderMut { map: self }
     }
 
@@ -1118,16 +1007,15 @@ impl<K, V, S> HashMap<K, V, S> {
     ///
     /// Immutable raw entries have very limited use; you might instead want `raw_entry_mut`.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn raw_entry(&self) -> RawEntryBuilder<'_, K, V, S> {
+    pub fn raw_entry(&self) -> RawEntryBuilder<'_, K, V> {
         RawEntryBuilder { map: self }
     }
 }
 
-impl<K, V, S> PartialEq for HashMap<K, V, S>
+impl<K, V> PartialEq for AutoHashMap<K, V>
 where
-    K: Eq + Hash,
+    K: Eq + AutoHash,
     V: PartialEq,
-    S: BuildHasher,
 {
     fn eq(&self, other: &Self) -> bool {
         if self.len() != other.len() {
@@ -1139,15 +1027,14 @@ where
     }
 }
 
-impl<K, V, S> Eq for HashMap<K, V, S>
+impl<K, V> Eq for AutoHashMap<K, V>
 where
-    K: Eq + Hash,
+    K: Eq + AutoHash,
     V: Eq,
-    S: BuildHasher,
 {
 }
 
-impl<K, V, S> Debug for HashMap<K, V, S>
+impl<K, V> Debug for AutoHashMap<K, V>
 where
     K: Debug,
     V: Debug,
@@ -1157,22 +1044,18 @@ where
     }
 }
 
-impl<K, V, S> Default for HashMap<K, V, S>
-where
-    S: Default,
-{
-    /// Creates an empty `HashMap<K, V, S>`, with the `Default` value for the hasher.
+impl<K, V> Default for AutoHashMap<K, V> {
+    /// Creates an empty `AutoHashMap<K, V>`
     #[cfg_attr(feature = "inline-more", inline)]
     fn default() -> Self {
-        Self::with_hasher(Default::default())
+        Self::new()
     }
 }
 
-impl<K, Q: ?Sized, V, S> Index<&Q> for HashMap<K, V, S>
+impl<K, Q: ?Sized, V> Index<&Q> for AutoHashMap<K, V>
 where
-    K: Eq + Hash + Borrow<Q>,
-    Q: Eq + Hash,
-    S: BuildHasher,
+    K: Eq + AutoHash + Borrow<Q>,
+    Q: Eq + AutoHash,
 {
     type Output = V;
 
@@ -1440,8 +1323,8 @@ pub struct ValuesMut<'a, K, V> {
 /// See the [`HashMap::raw_entry_mut`] docs for usage examples.
 ///
 /// [`HashMap::raw_entry_mut`]: struct.HashMap.html#method.raw_entry_mut
-pub struct RawEntryBuilderMut<'a, K, V, S> {
-    map: &'a mut HashMap<K, V, S>,
+pub struct RawEntryBuilderMut<'a, K, V> {
+    map: &'a mut AutoHashMap<K, V>,
 }
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
@@ -1455,35 +1338,32 @@ pub struct RawEntryBuilderMut<'a, K, V, S> {
 /// [`Entry`]: enum.Entry.html
 /// [`raw_entry_mut`]: struct.HashMap.html#method.raw_entry_mut
 /// [`RawEntryBuilderMut`]: struct.RawEntryBuilderMut.html
-pub enum RawEntryMut<'a, K, V, S> {
+pub enum RawEntryMut<'a, K, V> {
     /// An occupied entry.
-    Occupied(RawOccupiedEntryMut<'a, K, V, S>),
+    Occupied(RawOccupiedEntryMut<'a, K, V>),
     /// A vacant entry.
-    Vacant(RawVacantEntryMut<'a, K, V, S>),
+    Vacant(RawVacantEntryMut<'a, K, V>),
 }
 
 /// A view into an occupied entry in a `HashMap`.
 /// It is part of the [`RawEntryMut`] enum.
 ///
 /// [`RawEntryMut`]: enum.RawEntryMut.html
-pub struct RawOccupiedEntryMut<'a, K, V, S> {
+pub struct RawOccupiedEntryMut<'a, K, V> {
     elem: Bucket<(K, V)>,
     table: &'a mut RawTable<(K, V)>,
-    hash_builder: &'a S,
 }
 
-unsafe impl<K, V, S> Send for RawOccupiedEntryMut<'_, K, V, S>
+unsafe impl<K, V> Send for RawOccupiedEntryMut<'_, K, V>
 where
     K: Send,
     V: Send,
-    S: Sync,
 {
 }
-unsafe impl<K, V, S> Sync for RawOccupiedEntryMut<'_, K, V, S>
+unsafe impl<K, V> Sync for RawOccupiedEntryMut<'_, K, V>
 where
     K: Sync,
     V: Sync,
-    S: Sync,
 {
 }
 
@@ -1491,9 +1371,8 @@ where
 /// It is part of the [`RawEntryMut`] enum.
 ///
 /// [`RawEntryMut`]: enum.RawEntryMut.html
-pub struct RawVacantEntryMut<'a, K, V, S> {
+pub struct RawVacantEntryMut<'a, K, V> {
     table: &'a mut RawTable<(K, V)>,
-    hash_builder: &'a S,
 }
 
 /// A builder for computing where in a [`HashMap`] a key-value pair would be stored.
@@ -1501,42 +1380,37 @@ pub struct RawVacantEntryMut<'a, K, V, S> {
 /// See the [`HashMap::raw_entry`] docs for usage examples.
 ///
 /// [`HashMap::raw_entry`]: struct.HashMap.html#method.raw_entry
-pub struct RawEntryBuilder<'a, K, V, S> {
-    map: &'a HashMap<K, V, S>,
+pub struct RawEntryBuilder<'a, K, V> {
+    map: &'a AutoHashMap<K, V>,
 }
 
-impl<'a, K, V, S> RawEntryBuilderMut<'a, K, V, S> {
+impl<'a, K, V> RawEntryBuilderMut<'a, K, V> {
     /// Creates a `RawEntryMut` from the given key.
     #[cfg_attr(feature = "inline-more", inline)]
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_key<Q: ?Sized>(self, k: &Q) -> RawEntryMut<'a, K, V, S>
+    pub fn from_key<Q: ?Sized>(self, k: &Q) -> RawEntryMut<'a, K, V>
     where
-        S: BuildHasher,
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
-        let mut hasher = self.map.hash_builder.build_hasher();
-        k.hash(&mut hasher);
-        self.from_key_hashed_nocheck(hasher.finish(), k)
+        self.from_key_hashed_nocheck(k.get_hash(), k)
     }
 
     /// Creates a `RawEntryMut` from the given key and its hash.
     #[inline]
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_key_hashed_nocheck<Q: ?Sized>(self, hash: u64, k: &Q) -> RawEntryMut<'a, K, V, S>
+    pub fn from_key_hashed_nocheck<Q: ?Sized>(self, hash: u64, k: &Q) -> RawEntryMut<'a, K, V>
     where
         K: Borrow<Q>,
         Q: Eq,
     {
         self.from_hash(hash, |q| q.borrow().eq(k))
     }
-}
 
-impl<'a, K, V, S> RawEntryBuilderMut<'a, K, V, S> {
     /// Creates a `RawEntryMut` from the given hash.
     #[cfg_attr(feature = "inline-more", inline)]
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_hash<F>(self, hash: u64, is_match: F) -> RawEntryMut<'a, K, V, S>
+    pub fn from_hash<F>(self, hash: u64, is_match: F) -> RawEntryMut<'a, K, V>
     where
         for<'b> F: FnMut(&'b K) -> bool,
     {
@@ -1544,7 +1418,7 @@ impl<'a, K, V, S> RawEntryBuilderMut<'a, K, V, S> {
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
-    fn search<F>(self, hash: u64, mut is_match: F) -> RawEntryMut<'a, K, V, S>
+    fn search<F>(self, hash: u64, mut is_match: F) -> RawEntryMut<'a, K, V>
     where
         for<'b> F: FnMut(&'b K) -> bool,
     {
@@ -1552,29 +1426,24 @@ impl<'a, K, V, S> RawEntryBuilderMut<'a, K, V, S> {
             Some(elem) => RawEntryMut::Occupied(RawOccupiedEntryMut {
                 elem,
                 table: &mut self.map.table,
-                hash_builder: &self.map.hash_builder,
             }),
             None => RawEntryMut::Vacant(RawVacantEntryMut {
                 table: &mut self.map.table,
-                hash_builder: &self.map.hash_builder,
             }),
         }
     }
 }
 
-impl<'a, K, V, S> RawEntryBuilder<'a, K, V, S> {
+impl<'a, K, V> RawEntryBuilder<'a, K, V> {
     /// Access an entry by key.
     #[cfg_attr(feature = "inline-more", inline)]
     #[allow(clippy::wrong_self_convention)]
     pub fn from_key<Q: ?Sized>(self, k: &Q) -> Option<(&'a K, &'a V)>
     where
-        S: BuildHasher,
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: AutoHash + Eq,
     {
-        let mut hasher = self.map.hash_builder.build_hasher();
-        k.hash(&mut hasher);
-        self.from_key_hashed_nocheck(hasher.finish(), k)
+        self.from_key_hashed_nocheck(k.get_hash(), k)
     }
 
     /// Access an entry by a key and its hash.
@@ -1583,7 +1452,7 @@ impl<'a, K, V, S> RawEntryBuilder<'a, K, V, S> {
     pub fn from_key_hashed_nocheck<Q: ?Sized>(self, hash: u64, k: &Q) -> Option<(&'a K, &'a V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Eq,
     {
         self.from_hash(hash, |q| q.borrow().eq(k))
     }
@@ -1613,7 +1482,7 @@ impl<'a, K, V, S> RawEntryBuilder<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V, S> RawEntryMut<'a, K, V, S> {
+impl<'a, K, V> RawEntryMut<'a, K, V> {
     /// Sets the value of the entry, and returns a RawOccupiedEntryMut.
     ///
     /// # Examples
@@ -1627,10 +1496,9 @@ impl<'a, K, V, S> RawEntryMut<'a, K, V, S> {
     /// assert_eq!(entry.remove_entry(), ("horseyland", 37));
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn insert(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V, S>
+    pub fn insert(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V>
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             RawEntryMut::Occupied(mut entry) => {
@@ -1660,8 +1528,7 @@ impl<'a, K, V, S> RawEntryMut<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn or_insert(self, default_key: K, default_val: V) -> (&'a mut K, &'a mut V)
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             RawEntryMut::Occupied(entry) => entry.into_key_value(),
@@ -1689,8 +1556,7 @@ impl<'a, K, V, S> RawEntryMut<'a, K, V, S> {
     pub fn or_insert_with<F>(self, default: F) -> (&'a mut K, &'a mut V)
     where
         F: FnOnce() -> (K, V),
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             RawEntryMut::Occupied(entry) => entry.into_key_value(),
@@ -1807,7 +1673,7 @@ impl<'a, K, V, S> RawEntryMut<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V, S> RawOccupiedEntryMut<'a, K, V, S> {
+impl<'a, K, V> RawOccupiedEntryMut<'a, K, V> {
     /// Gets a reference to the key in the entry.
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn key(&self) -> &K {
@@ -1902,7 +1768,7 @@ impl<'a, K, V, S> RawOccupiedEntryMut<'a, K, V, S> {
     /// the entry and allows to replace or remove it based on the
     /// value of the returned option.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn replace_entry_with<F>(self, f: F) -> RawEntryMut<'a, K, V, S>
+    pub fn replace_entry_with<F>(self, f: F) -> RawEntryMut<'a, K, V>
     where
         F: FnOnce(&K, V) -> Option<V>,
     {
@@ -1918,25 +1784,21 @@ impl<'a, K, V, S> RawOccupiedEntryMut<'a, K, V, S> {
             } else {
                 RawEntryMut::Vacant(RawVacantEntryMut {
                     table: self.table,
-                    hash_builder: self.hash_builder,
                 })
             }
         }
     }
 }
 
-impl<'a, K, V, S> RawVacantEntryMut<'a, K, V, S> {
+impl<'a, K, V> RawVacantEntryMut<'a, K, V> {
     /// Sets the value of the entry with the VacantEntry's key,
     /// and returns a mutable reference to it.
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn insert(self, key: K, value: V) -> (&'a mut K, &'a mut V)
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-        self.insert_hashed_nocheck(hasher.finish(), key, value)
+        self.insert_hashed_nocheck(key.get_hash(), key, value)
     }
 
     /// Sets the value of the entry with the VacantEntry's key,
@@ -1945,11 +1807,9 @@ impl<'a, K, V, S> RawVacantEntryMut<'a, K, V, S> {
     #[allow(clippy::shadow_unrelated)]
     pub fn insert_hashed_nocheck(self, hash: u64, key: K, value: V) -> (&'a mut K, &'a mut V)
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
-        let hash_builder = self.hash_builder;
-        self.insert_with_hasher(hash, key, value, |k| make_hash(hash_builder, k))
+        self.insert_with_hasher(hash, key, value, K::get_hash)
     }
 
     /// Set the value of an entry with a custom hasher function.
@@ -1972,33 +1832,25 @@ impl<'a, K, V, S> RawVacantEntryMut<'a, K, V, S> {
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
-    fn insert_entry(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V, S>
+    fn insert_entry(self, key: K, value: V) -> RawOccupiedEntryMut<'a, K, V>
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
-        let hash_builder = self.hash_builder;
-        let mut hasher = self.hash_builder.build_hasher();
-        key.hash(&mut hasher);
-
-        let elem = self.table.insert(hasher.finish(), (key, value), |k| {
-            make_hash(hash_builder, &k.0)
-        });
+        let elem = self.table.insert(key.get_hash(), (key, value), entry_hash);
         RawOccupiedEntryMut {
             elem,
             table: self.table,
-            hash_builder: self.hash_builder,
         }
     }
 }
 
-impl<K, V, S> Debug for RawEntryBuilderMut<'_, K, V, S> {
+impl<K, V> Debug for RawEntryBuilderMut<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawEntryBuilder").finish()
     }
 }
 
-impl<K: Debug, V: Debug, S> Debug for RawEntryMut<'_, K, V, S> {
+impl<K: Debug, V: Debug> Debug for RawEntryMut<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             RawEntryMut::Vacant(ref v) => f.debug_tuple("RawEntry").field(v).finish(),
@@ -2007,7 +1859,7 @@ impl<K: Debug, V: Debug, S> Debug for RawEntryMut<'_, K, V, S> {
     }
 }
 
-impl<K: Debug, V: Debug, S> Debug for RawOccupiedEntryMut<'_, K, V, S> {
+impl<K: Debug, V: Debug> Debug for RawOccupiedEntryMut<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawOccupiedEntryMut")
             .field("key", self.key())
@@ -2016,13 +1868,13 @@ impl<K: Debug, V: Debug, S> Debug for RawOccupiedEntryMut<'_, K, V, S> {
     }
 }
 
-impl<K, V, S> Debug for RawVacantEntryMut<'_, K, V, S> {
+impl<K, V> Debug for RawVacantEntryMut<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawVacantEntryMut").finish()
     }
 }
 
-impl<K, V, S> Debug for RawEntryBuilder<'_, K, V, S> {
+impl<K, V> Debug for RawEntryBuilder<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawEntryBuilder").finish()
     }
@@ -2034,15 +1886,15 @@ impl<K, V, S> Debug for RawEntryBuilder<'_, K, V, S> {
 ///
 /// [`HashMap`]: struct.HashMap.html
 /// [`entry`]: struct.HashMap.html#method.entry
-pub enum Entry<'a, K, V, S> {
+pub enum Entry<'a, K, V> {
     /// An occupied entry.
-    Occupied(OccupiedEntry<'a, K, V, S>),
+    Occupied(OccupiedEntry<'a, K, V>),
 
     /// A vacant entry.
-    Vacant(VacantEntry<'a, K, V, S>),
+    Vacant(VacantEntry<'a, K, V>),
 }
 
-impl<K: Debug, V: Debug, S> Debug for Entry<'_, K, V, S> {
+impl<K: Debug, V: Debug> Debug for Entry<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Entry::Vacant(ref v) => f.debug_tuple("Entry").field(v).finish(),
@@ -2055,29 +1907,17 @@ impl<K: Debug, V: Debug, S> Debug for Entry<'_, K, V, S> {
 /// It is part of the [`Entry`] enum.
 ///
 /// [`Entry`]: enum.Entry.html
-pub struct OccupiedEntry<'a, K, V, S> {
+pub struct OccupiedEntry<'a, K, V> {
     hash: u64,
     key: Option<K>,
     elem: Bucket<(K, V)>,
-    table: &'a mut HashMap<K, V, S>,
+    table: &'a mut AutoHashMap<K, V>,
 }
 
-unsafe impl<K, V, S> Send for OccupiedEntry<'_, K, V, S>
-where
-    K: Send,
-    V: Send,
-    S: Send,
-{
-}
-unsafe impl<K, V, S> Sync for OccupiedEntry<'_, K, V, S>
-where
-    K: Sync,
-    V: Sync,
-    S: Sync,
-{
-}
+unsafe impl<K: Send, V: Send> Send for OccupiedEntry<'_, K, V> {}
+unsafe impl<K: Sync, V: Sync> Sync for OccupiedEntry<'_, K, V> {}
 
-impl<K: Debug, V: Debug, S> Debug for OccupiedEntry<'_, K, V, S> {
+impl<K: Debug, V: Debug> Debug for OccupiedEntry<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedEntry")
             .field("key", self.key())
@@ -2090,19 +1930,19 @@ impl<K: Debug, V: Debug, S> Debug for OccupiedEntry<'_, K, V, S> {
 /// It is part of the [`Entry`] enum.
 ///
 /// [`Entry`]: enum.Entry.html
-pub struct VacantEntry<'a, K, V, S> {
+pub struct VacantEntry<'a, K, V> {
     hash: u64,
     key: K,
-    table: &'a mut HashMap<K, V, S>,
+    table: &'a mut AutoHashMap<K, V>,
 }
 
-impl<K: Debug, V, S> Debug for VacantEntry<'_, K, V, S> {
+impl<K: Debug, V> Debug for VacantEntry<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("VacantEntry").field(self.key()).finish()
     }
 }
 
-impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S> {
+impl<'a, K, V> IntoIterator for &'a AutoHashMap<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
 
@@ -2112,7 +1952,7 @@ impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S> {
     }
 }
 
-impl<'a, K, V, S> IntoIterator for &'a mut HashMap<K, V, S> {
+impl<'a, K, V> IntoIterator for &'a mut AutoHashMap<K, V> {
     type Item = (&'a K, &'a mut V);
     type IntoIter = IterMut<'a, K, V>;
 
@@ -2122,7 +1962,7 @@ impl<'a, K, V, S> IntoIterator for &'a mut HashMap<K, V, S> {
     }
 }
 
-impl<K, V, S> IntoIterator for HashMap<K, V, S> {
+impl<K, V> IntoIterator for AutoHashMap<K, V> {
     type Item = (K, V);
     type IntoIter = IntoIter<K, V>;
 
@@ -2354,7 +2194,7 @@ where
     }
 }
 
-impl<'a, K, V, S> Entry<'a, K, V, S> {
+impl<'a, K, V> Entry<'a, K, V> {
     /// Sets the value of the entry, and returns an OccupiedEntry.
     ///
     /// # Examples
@@ -2368,10 +2208,9 @@ impl<'a, K, V, S> Entry<'a, K, V, S> {
     /// assert_eq!(entry.key(), &"horseyland");
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn insert(self, value: V) -> OccupiedEntry<'a, K, V, S>
+    pub fn insert(self, value: V) -> OccupiedEntry<'a, K, V>
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             Entry::Occupied(mut entry) => {
@@ -2401,8 +2240,7 @@ impl<'a, K, V, S> Entry<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn or_insert(self, default: V) -> &'a mut V
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -2428,8 +2266,7 @@ impl<'a, K, V, S> Entry<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -2455,8 +2292,7 @@ impl<'a, K, V, S> Entry<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> &'a mut V
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -2585,7 +2421,7 @@ impl<'a, K, V, S> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V: Default, S> Entry<'a, K, V, S> {
+impl<'a, K, V: Default> Entry<'a, K, V> {
     /// Ensures a value is in the entry by inserting the default value if empty,
     /// and returns a mutable reference to the value in the entry.
     ///
@@ -2602,8 +2438,7 @@ impl<'a, K, V: Default, S> Entry<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn or_default(self) -> &'a mut V
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
         match self {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -2612,7 +2447,7 @@ impl<'a, K, V: Default, S> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V, S> OccupiedEntry<'a, K, V, S> {
+impl<'a, K, V> OccupiedEntry<'a, K, V> {
     /// Gets a reference to the key in the entry.
     ///
     /// # Examples
@@ -2887,7 +2722,7 @@ impl<'a, K, V, S> OccupiedEntry<'a, K, V, S> {
     /// assert!(!map.contains_key("poneyland"));
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn replace_entry_with<F>(self, f: F) -> Entry<'a, K, V, S>
+    pub fn replace_entry_with<F>(self, f: F) -> Entry<'a, K, V>
     where
         F: FnOnce(&K, V) -> Option<V>,
     {
@@ -2918,7 +2753,7 @@ impl<'a, K, V, S> OccupiedEntry<'a, K, V, S> {
     }
 }
 
-impl<'a, K, V, S> VacantEntry<'a, K, V, S> {
+impl<'a, K, V> VacantEntry<'a, K, V> {
     /// Gets a reference to the key that would be used when inserting a value
     /// through the `VacantEntry`.
     ///
@@ -2973,26 +2808,18 @@ impl<'a, K, V, S> VacantEntry<'a, K, V, S> {
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn insert(self, value: V) -> &'a mut V
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
-        let hash_builder = &self.table.hash_builder;
-        let bucket = self.table.table.insert(self.hash, (self.key, value), |x| {
-            make_hash(hash_builder, &x.0)
-        });
+        let bucket = self.table.table.insert(self.hash, (self.key, value), entry_hash);
         unsafe { &mut bucket.as_mut().1 }
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
-    fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S>
+    fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V>
     where
-        K: Hash,
-        S: BuildHasher,
+        K: AutoHash,
     {
-        let hash_builder = &self.table.hash_builder;
-        let elem = self.table.table.insert(self.hash, (self.key, value), |x| {
-            make_hash(hash_builder, &x.0)
-        });
+        let elem = self.table.table.insert(self.hash, (self.key, value), entry_hash);
         OccupiedEntry {
             hash: self.hash,
             key: None,
@@ -3002,15 +2829,14 @@ impl<'a, K, V, S> VacantEntry<'a, K, V, S> {
     }
 }
 
-impl<K, V, S> FromIterator<(K, V)> for HashMap<K, V, S>
+impl<K, V> FromIterator<(K, V)> for AutoHashMap<K, V>
 where
-    K: Eq + Hash,
-    S: BuildHasher + Default,
+    K: Eq + AutoHash,
 {
     #[cfg_attr(feature = "inline-more", inline)]
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let iter = iter.into_iter();
-        let mut map = Self::with_capacity_and_hasher(iter.size_hint().0, S::default());
+        let mut map = Self::with_capacity(iter.size_hint().0);
         iter.for_each(|(k, v)| {
             map.insert(k, v);
         });
@@ -3020,10 +2846,9 @@ where
 
 /// Inserts all new key-values from the iterator and replaces values with existing
 /// keys with new values returned from the iterator.
-impl<K, V, S> Extend<(K, V)> for HashMap<K, V, S>
+impl<K, V> Extend<(K, V)> for AutoHashMap<K, V>
 where
-    K: Eq + Hash,
-    S: BuildHasher,
+    K: Eq + AutoHash,
 {
     #[cfg_attr(feature = "inline-more", inline)]
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
@@ -3065,11 +2890,10 @@ where
     }
 }
 
-impl<'a, K, V, S> Extend<(&'a K, &'a V)> for HashMap<K, V, S>
+impl<'a, K, V> Extend<(&'a K, &'a V)> for AutoHashMap<K, V>
 where
-    K: Eq + Hash + Copy,
+    K: Eq + AutoHash + Copy,
     V: Copy,
-    S: BuildHasher,
 {
     #[cfg_attr(feature = "inline-more", inline)]
     fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {
@@ -3091,10 +2915,10 @@ where
 
 #[allow(dead_code)]
 fn assert_covariance() {
-    fn map_key<'new>(v: HashMap<&'static str, u8>) -> HashMap<&'new str, u8> {
+    fn map_key<'new>(v: AutoHashMap<&'static str, u8>) -> AutoHashMap<&'new str, u8> {
         v
     }
-    fn map_val<'new>(v: HashMap<u8, &'static str>) -> HashMap<u8, &'new str> {
+    fn map_val<'new>(v: AutoHashMap<u8, &'static str>) -> AutoHashMap<u8, &'new str> {
         v
     }
     fn iter_key<'a, 'new>(v: Iter<'a, &'static str, u8>) -> Iter<'a, &'new str, u8> {
@@ -3128,11 +2952,11 @@ fn assert_covariance() {
     }
 }
 
+#[cfg(FIXME)]
 #[cfg(test)]
 mod test_map {
-    use super::DefaultHashBuilder;
     use super::Entry::{Occupied, Vacant};
-    use super::{HashMap, RawEntryMut};
+    use super::{AutoHashMap, RawEntryMut};
     use crate::TryReserveError::*;
     use rand::{rngs::SmallRng, Rng, SeedableRng};
     use std::cell::RefCell;
@@ -4524,4 +4348,14 @@ mod test_map {
         map.insert(17, "seventeen".to_owned());
         assert_eq!("seventeen", map[&17]);
     }
+}
+
+#[cfg(feature = "rayon")]
+/// [rayon]-based parallel iterator types for hash maps.
+/// You will rarely need to interact with it directly unless you have need
+/// to name one of the iterator types.
+///
+/// [rayon]: https://docs.rs/rayon/1.0/rayon
+pub mod rayon {
+    pub use crate::external_trait_impls::rayon::map::*;
 }

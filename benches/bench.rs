@@ -6,18 +6,39 @@
 
 extern crate test;
 
-use test::{black_box, Bencher};
-
-use hashbrown::hash_map::DefaultHashBuilder;
+use ahash::AHasher;
+use autohash::wrappers::{AutoHashed, MemoHashed};
+use autohash::{AutoHash, AutoHashMap};
 use hashbrown::HashMap;
-use std::collections::hash_map::RandomState;
+use paste::paste;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::BuildHasherDefault;
+use test::{black_box, Bencher};
 
 const SIZE: usize = 1000;
 
-// The default hashmap when using this crate directly.
-type AHashMap<K, V> = HashMap<K, V, DefaultHashBuilder>;
-// This uses the hashmap from this crate with the default hasher of the stdlib.
-type StdHashMap<K, V> = HashMap<K, V, RandomState>;
+type AutoHashedMap<H> = AutoHashMap<AutoHashed<usize, H>, usize>;
+type MemoHashedMap<H> = AutoHashMap<MemoHashed<usize, H>, usize>;
+type UsizeHashMap = AutoHashMap<UsizeHash, usize>;
+
+type HashbrownMap<H> = HashMap<usize, usize, BuildHasherDefault<H>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct UsizeHash(usize);
+
+impl From<usize> for UsizeHash {
+    #[inline]
+    fn from(hash: usize) -> Self {
+        UsizeHash(hash)
+    }
+}
+
+impl AutoHash for UsizeHash {
+    #[inline]
+    fn get_hash(&self) -> u64 {
+        self.0 as u64
+    }
+}
 
 // A random key iterator.
 #[derive(Clone, Copy)]
@@ -41,59 +62,65 @@ impl Iterator for RandomKeys {
 }
 
 macro_rules! bench_suite {
-    ($bench_macro:ident, $bench_ahash_serial:ident, $bench_std_serial:ident,
-     $bench_ahash_highbits:ident, $bench_std_highbits:ident,
-     $bench_ahash_random:ident, $bench_std_random:ident) => {
-        $bench_macro!($bench_ahash_serial, AHashMap, 0..);
-        $bench_macro!($bench_std_serial, StdHashMap, 0..);
-        $bench_macro!(
-            $bench_ahash_highbits,
-            AHashMap,
-            (0..).map(usize::swap_bytes)
-        );
-        $bench_macro!(
-            $bench_std_highbits,
-            StdHashMap,
-            (0..).map(usize::swap_bytes)
-        );
-        $bench_macro!($bench_ahash_random, AHashMap, RandomKeys::new());
-        $bench_macro!($bench_std_random, StdHashMap, RandomKeys::new());
+    (@ $bench:ident, $name:ident, $map:ty) => {
+        paste! {
+            $bench!([<$bench _ $name _serial>], $map, 0usize..);
+            $bench!([<$bench _ $name _highbits>], $map, (0..).map(usize::swap_bytes));
+            $bench!([<$bench _ $name _random>], $map, RandomKeys::new());
+        }
+    };
+    ($bench:ident) => {
+        bench_suite!(@ $bench, auto_hashed_ahash, AutoHashedMap<AHasher>);
+        bench_suite!(@ $bench, auto_hashed_std, AutoHashedMap<DefaultHasher>);
+        bench_suite!(@ $bench, memo_hashed_ahash, MemoHashedMap<AHasher>);
+        bench_suite!(@ $bench, memo_hashed_std, MemoHashedMap<DefaultHasher>);
+        bench_suite!(@ $bench, hashbrown_ahash, HashbrownMap<AHasher>);
+        bench_suite!(@ $bench, hashbrown_std, HashbrownMap<DefaultHasher>);
+        bench_suite!(@ $bench, usize_hash, UsizeHashMap);
     };
 }
 
-macro_rules! bench_insert {
-    ($name:ident, $maptype:ident, $keydist:expr) => {
+macro_rules! insert_reserved {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
         #[bench]
         fn $name(b: &mut Bencher) {
-            let mut m = $maptype::with_capacity_and_hasher(SIZE, Default::default());
+            let mut m: $maptype = Default::default();
+            m.reserve(SIZE);
             b.iter(|| {
                 m.clear();
                 for i in ($keydist).take(SIZE) {
-                    m.insert(i, i);
+                    m.insert(i.into(), i);
                 }
                 black_box(&mut m);
             })
         }
     };
 }
+bench_suite!(insert_reserved);
 
-bench_suite!(
-    bench_insert,
-    insert_ahash_serial,
-    insert_std_serial,
-    insert_ahash_highbits,
-    insert_std_highbits,
-    insert_ahash_random,
-    insert_std_random
-);
-
-macro_rules! bench_insert_erase {
-    ($name:ident, $maptype:ident, $keydist:expr) => {
+macro_rules! insert_unreserved {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
         #[bench]
         fn $name(b: &mut Bencher) {
-            let mut base = $maptype::default();
+            b.iter(|| {
+                let mut m: $maptype = Default::default();
+                for i in ($keydist).take(SIZE) {
+                    m.insert(i.into(), i);
+                }
+                black_box(m);
+            })
+        }
+    };
+}
+bench_suite!(insert_unreserved);
+
+macro_rules! insert_erase {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut base: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                base.insert(i, i);
+                base.insert(i.into(), i);
             }
             let skip = $keydist.skip(SIZE);
             b.iter(|| {
@@ -103,89 +130,62 @@ macro_rules! bench_insert_erase {
                 // While keeping the size constant,
                 // replace the first keydist with the second.
                 for (add, remove) in (&mut add_iter).zip(&mut remove_iter).take(SIZE) {
-                    m.insert(add, add);
-                    black_box(m.remove(&remove));
+                    m.insert(add.into(), add);
+                    black_box(m.remove(&remove.into()));
                 }
                 black_box(m);
             })
         }
     };
 }
+bench_suite!(insert_erase);
 
-bench_suite!(
-    bench_insert_erase,
-    insert_erase_ahash_serial,
-    insert_erase_std_serial,
-    insert_erase_ahash_highbits,
-    insert_erase_std_highbits,
-    insert_erase_ahash_random,
-    insert_erase_std_random
-);
-
-macro_rules! bench_lookup {
-    ($name:ident, $maptype:ident, $keydist:expr) => {
+macro_rules! lookup_pass {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
         #[bench]
         fn $name(b: &mut Bencher) {
-            let mut m = $maptype::default();
+            let mut m: $maptype = Default::default();
             for i in $keydist.take(SIZE) {
-                m.insert(i, i);
+                m.insert(i.into(), i);
             }
 
             b.iter(|| {
                 for i in $keydist.take(SIZE) {
-                    black_box(m.get(&i));
+                    black_box(m.get(&i.into()));
                 }
             })
         }
     };
 }
+bench_suite!(lookup_pass);
 
-bench_suite!(
-    bench_lookup,
-    lookup_ahash_serial,
-    lookup_std_serial,
-    lookup_ahash_highbits,
-    lookup_std_highbits,
-    lookup_ahash_random,
-    lookup_std_random
-);
-
-macro_rules! bench_lookup_fail {
-    ($name:ident, $maptype:ident, $keydist:expr) => {
+macro_rules! lookup_fail {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
         #[bench]
         fn $name(b: &mut Bencher) {
-            let mut m = $maptype::default();
+            let mut m: $maptype = Default::default();
             let mut iter = $keydist;
             for i in (&mut iter).take(SIZE) {
-                m.insert(i, i);
+                m.insert(i.into(), i);
             }
 
             b.iter(|| {
                 for i in (&mut iter).take(SIZE) {
-                    black_box(m.get(&i));
+                    black_box(m.get(&i.into()));
                 }
             })
         }
     };
 }
+bench_suite!(lookup_fail);
 
-bench_suite!(
-    bench_lookup_fail,
-    lookup_fail_ahash_serial,
-    lookup_fail_std_serial,
-    lookup_fail_ahash_highbits,
-    lookup_fail_std_highbits,
-    lookup_fail_ahash_random,
-    lookup_fail_std_random
-);
-
-macro_rules! bench_iter {
-    ($name:ident, $maptype:ident, $keydist:expr) => {
+macro_rules! iter {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
         #[bench]
         fn $name(b: &mut Bencher) {
-            let mut m = $maptype::default();
+            let mut m: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                m.insert(i, i);
+                m.insert(i.into(), i);
             }
 
             b.iter(|| {
@@ -196,65 +196,95 @@ macro_rules! bench_iter {
         }
     };
 }
+bench_suite!(iter);
 
-bench_suite!(
-    bench_iter,
-    iter_ahash_serial,
-    iter_std_serial,
-    iter_ahash_highbits,
-    iter_std_highbits,
-    iter_ahash_random,
-    iter_std_random
-);
+macro_rules! clone_small {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut m: $maptype = Default::default();
+            for i in ($keydist).take(10) {
+                m.insert(i.into(), i);
+            }
 
-#[bench]
-fn clone_small(b: &mut Bencher) {
-    let mut m = HashMap::new();
-    for i in 0..10 {
-        m.insert(i, i);
-    }
-
-    b.iter(|| {
-        black_box(m.clone());
-    })
+            b.iter(|| {
+                black_box(m.clone());
+            })
+        }
+    };
 }
+bench_suite!(clone_small);
 
-#[bench]
-fn clone_from_small(b: &mut Bencher) {
-    let mut m = HashMap::new();
-    let mut m2 = HashMap::new();
-    for i in 0..10 {
-        m.insert(i, i);
-    }
+macro_rules! clone_from_small {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut m: $maptype = Default::default();
+            let mut m2: $maptype = Default::default();
+            for i in ($keydist).take(10) {
+                m.insert(i.into(), i);
+            }
 
-    b.iter(|| {
-        m2.clone_from(&m);
-        black_box(&mut m2);
-    })
+            b.iter(|| {
+                m2.clone_from(&m);
+                black_box(&mut m2);
+            })
+        }
+    };
 }
+bench_suite!(clone_from_small);
 
-#[bench]
-fn clone_large(b: &mut Bencher) {
-    let mut m = HashMap::new();
-    for i in 0..1000 {
-        m.insert(i, i);
-    }
+macro_rules! clone_large {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut m: $maptype = Default::default();
+            for i in ($keydist).take(SIZE) {
+                m.insert(i.into(), i);
+            }
 
-    b.iter(|| {
-        black_box(m.clone());
-    })
+            b.iter(|| {
+                black_box(m.clone());
+            })
+        }
+    };
 }
+bench_suite!(clone_large);
 
-#[bench]
-fn clone_from_large(b: &mut Bencher) {
-    let mut m = HashMap::new();
-    let mut m2 = HashMap::new();
-    for i in 0..1000 {
-        m.insert(i, i);
-    }
+macro_rules! clone_from_large {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut m: $maptype = Default::default();
+            let mut m2: $maptype = Default::default();
+            for i in ($keydist).take(SIZE) {
+                m.insert(i.into(), i);
+            }
 
-    b.iter(|| {
-        m2.clone_from(&m);
-        black_box(&mut m2);
-    })
+            b.iter(|| {
+                m2.clone_from(&m);
+                black_box(&mut m2);
+            })
+        }
+    };
 }
+bench_suite!(clone_from_large);
+
+macro_rules! grow_shrink {
+    ($name:ident, $maptype:ty, $keydist:expr) => {
+        #[bench]
+        fn $name(b: &mut Bencher) {
+            let mut m: $maptype = Default::default();
+            for i in ($keydist).take(SIZE) {
+                m.insert(i.into(), i);
+            }
+            m.shrink_to_fit();
+
+            b.iter(|| {
+                m.reserve(10 * SIZE);
+                m.shrink_to_fit();
+            })
+        }
+    };
+}
+bench_suite!(grow_shrink);

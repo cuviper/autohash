@@ -1,56 +1,44 @@
 [package]
-name = "hashbrown"
-version = "0.9.0"
-authors = ["Amanieu d'Antras <amanieu@gmail.com>"]
-description = "A Rust port of Google's SwissTable hash map"
+name = "autohash"
+version = "0.1.0"
+authors = ["Josh Stone <cuviper@gmail.com>"]
+description = "A Map and Set for self-hashed keys"
 license = "Apache-2.0/MIT"
-repository = "https://github.com/rust-lang/hashbrown"
+repository = "https://github.com/cuviper/autohash"
 readme = "README.md"
-keywords = ["hash", "no_std", "hashmap", "swisstable"]
+keywords = ["hash", "no_std", "hashmap", "hashset"]
 categories = ["data-structures", "no-std"]
-exclude = [".travis.yml", "bors.toml", "/ci/*"]
 edition = "2018"
 
-[dependencies]
-# For the default hasher
-ahash = { version = "0.4.4", optional = true, default-features = false }
+# For the raw table
+[dependencies.hashbrown]
+version = "0.9.0"
+default-features = false
+features = ["raw"] 
 
+[dependencies]
 # For external trait impls
-rayon = { version = "1.0", optional = true }
+rayon_dep = { version = "1.0", optional = true, package = "rayon" }
 serde = { version = "1.0.25", default-features = false, optional = true }
 
-# When built as part of libstd
-core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
-compiler_builtins = { version = "0.1.2", optional = true }
-alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
-
 [dev-dependencies]
-lazy_static = "1.2"
-rand = { version = "0.7.3", features = ["small_rng"] }
-rayon = "1.0"
-rustc-hash = "=1.0"
-serde_test = "1.0"
-doc-comment = "0.3.1"
+ahash = { version = "0.4.4", default-features = false }
+paste = "1.0.0"
+# TODO: update testing for AutoHashMap/Set
+# lazy_static = "1.2"
+# rand = { version = "0.7.3", features = ["small_rng"] }
+# rayon = "1.0"
+# serde_test = "1.0"
+# doc-comment = "0.3.1"
 
 [features]
-default = ["ahash", "inline-more"]
-
-ahash-compile-time-rng = ["ahash/compile-time-rng"]
-nightly = []
-rustc-internal-api = []
-rustc-dep-of-std = [
-    "nightly",
-    "core",
-    "compiler_builtins",
-    "alloc",
-    "rustc-internal-api",
-]
-raw = []
+default = ["inline-more"]
+rayon = ["rayon_dep", "hashbrown/rayon"]
 
 # Enables usage of `#[inline]` on far more functions than by default in this
 # crate. This may lead to a performance increase but often comes at a compile
 # time cost.
-inline-more = []
+inline-more = ["hashbrown/inline-more"]
 
 [package.metadata.docs.rs]
-features = ["nightly", "rayon", "serde", "raw"]
+features = ["rayon", "serde"]

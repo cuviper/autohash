@@ -1,24 +1,25 @@
-//! Rayon extensions for `HashSet`.
+//! Rayon extensions for `AutoHashSet`.
 
-use crate::hash_set::HashSet;
-use core::hash::{BuildHasher, Hash};
-use rayon::iter::plumbing::UnindexedConsumer;
-use rayon::iter::{FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator};
+use crate::{AutoHash, AutoHashSet};
+use rayon_dep::iter::plumbing::UnindexedConsumer;
+use rayon_dep::iter::{
+    FromParallelIterator, IntoParallelIterator, ParallelExtend, ParallelIterator,
+};
 
 /// Parallel iterator over elements of a consumed set.
 ///
-/// This iterator is created by the [`into_par_iter`] method on [`HashSet`]
+/// This iterator is created by the [`into_par_iter`] method on [`AutoHashSet`]
 /// (provided by the [`IntoParallelIterator`] trait).
 /// See its documentation for more.
 ///
-/// [`into_par_iter`]: /hashbrown/struct.HashSet.html#method.into_par_iter
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
+/// [`into_par_iter`]: /autohash/struct.AutoHashSet.html#method.into_par_iter
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
 /// [`IntoParallelIterator`]: https://docs.rs/rayon/1.0/rayon/iter/trait.IntoParallelIterator.html
-pub struct IntoParIter<T, S> {
-    set: HashSet<T, S>,
+pub struct IntoParIter<T> {
+    set: AutoHashSet<T>,
 }
 
-impl<T: Send, S: Send> ParallelIterator for IntoParIter<T, S> {
+impl<T: Send> ParallelIterator for IntoParIter<T> {
     type Item = T;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
@@ -35,16 +36,16 @@ impl<T: Send, S: Send> ParallelIterator for IntoParIter<T, S> {
 
 /// Parallel draining iterator over entries of a set.
 ///
-/// This iterator is created by the [`par_drain`] method on [`HashSet`].
+/// This iterator is created by the [`par_drain`] method on [`AutoHashSet`].
 /// See its documentation for more.
 ///
-/// [`par_drain`]: /hashbrown/struct.HashSet.html#method.par_drain
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
-pub struct ParDrain<'a, T, S> {
-    set: &'a mut HashSet<T, S>,
+/// [`par_drain`]: /autohash/struct.AutoHashSet.html#method.par_drain
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
+pub struct ParDrain<'a, T> {
+    set: &'a mut AutoHashSet<T>,
 }
 
-impl<T: Send, S: Send> ParallelIterator for ParDrain<'_, T, S> {
+impl<T: Send> ParallelIterator for ParDrain<'_, T> {
     type Item = T;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
@@ -61,18 +62,18 @@ impl<T: Send, S: Send> ParallelIterator for ParDrain<'_, T, S> {
 
 /// Parallel iterator over shared references to elements in a set.
 ///
-/// This iterator is created by the [`par_iter`] method on [`HashSet`]
+/// This iterator is created by the [`par_iter`] method on [`AutoHashSet`]
 /// (provided by the [`IntoParallelRefIterator`] trait).
 /// See its documentation for more.
 ///
-/// [`par_iter`]: /hashbrown/struct.HashSet.html#method.par_iter
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
+/// [`par_iter`]: /autohash/struct.AutoHashSet.html#method.par_iter
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
 /// [`IntoParallelRefIterator`]: https://docs.rs/rayon/1.0/rayon/iter/trait.IntoParallelRefIterator.html
-pub struct ParIter<'a, T, S> {
-    set: &'a HashSet<T, S>,
+pub struct ParIter<'a, T> {
+    set: &'a AutoHashSet<T>,
 }
 
-impl<'a, T: Sync, S: Sync> ParallelIterator for ParIter<'a, T, S> {
+impl<'a, T: Sync> ParallelIterator for ParIter<'a, T> {
     type Item = &'a T;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
@@ -86,20 +87,19 @@ impl<'a, T: Sync, S: Sync> ParallelIterator for ParIter<'a, T, S> {
 /// Parallel iterator over shared references to elements in the difference of
 /// sets.
 ///
-/// This iterator is created by the [`par_difference`] method on [`HashSet`].
+/// This iterator is created by the [`par_difference`] method on [`AutoHashSet`].
 /// See its documentation for more.
 ///
-/// [`par_difference`]: /hashbrown/struct.HashSet.html#method.par_difference
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
-pub struct ParDifference<'a, T, S> {
-    a: &'a HashSet<T, S>,
-    b: &'a HashSet<T, S>,
+/// [`par_difference`]: /autohash/struct.AutoHashSet.html#method.par_difference
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
+pub struct ParDifference<'a, T> {
+    a: &'a AutoHashSet<T>,
+    b: &'a AutoHashSet<T>,
 }
 
-impl<'a, T, S> ParallelIterator for ParDifference<'a, T, S>
+impl<'a, T> ParallelIterator for ParDifference<'a, T>
 where
-    T: Eq + Hash + Sync,
-    S: BuildHasher + Sync,
+    T: Eq + AutoHash + Sync,
 {
     type Item = &'a T;
 
@@ -118,20 +118,19 @@ where
 /// difference of sets.
 ///
 /// This iterator is created by the [`par_symmetric_difference`] method on
-/// [`HashSet`].
+/// [`AutoHashSet`].
 /// See its documentation for more.
 ///
-/// [`par_symmetric_difference`]: /hashbrown/struct.HashSet.html#method.par_symmetric_difference
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
-pub struct ParSymmetricDifference<'a, T, S> {
-    a: &'a HashSet<T, S>,
-    b: &'a HashSet<T, S>,
+/// [`par_symmetric_difference`]: /autohash/struct.AutoHashSet.html#method.par_symmetric_difference
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
+pub struct ParSymmetricDifference<'a, T> {
+    a: &'a AutoHashSet<T>,
+    b: &'a AutoHashSet<T>,
 }
 
-impl<'a, T, S> ParallelIterator for ParSymmetricDifference<'a, T, S>
+impl<'a, T> ParallelIterator for ParSymmetricDifference<'a, T>
 where
-    T: Eq + Hash + Sync,
-    S: BuildHasher + Sync,
+    T: Eq + AutoHash + Sync,
 {
     type Item = &'a T;
 
@@ -149,20 +148,19 @@ where
 /// Parallel iterator over shared references to elements in the intersection of
 /// sets.
 ///
-/// This iterator is created by the [`par_intersection`] method on [`HashSet`].
+/// This iterator is created by the [`par_intersection`] method on [`AutoHashSet`].
 /// See its documentation for more.
 ///
-/// [`par_intersection`]: /hashbrown/struct.HashSet.html#method.par_intersection
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
-pub struct ParIntersection<'a, T, S> {
-    a: &'a HashSet<T, S>,
-    b: &'a HashSet<T, S>,
+/// [`par_intersection`]: /autohash/struct.AutoHashSet.html#method.par_intersection
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
+pub struct ParIntersection<'a, T> {
+    a: &'a AutoHashSet<T>,
+    b: &'a AutoHashSet<T>,
 }
 
-impl<'a, T, S> ParallelIterator for ParIntersection<'a, T, S>
+impl<'a, T> ParallelIterator for ParIntersection<'a, T>
 where
-    T: Eq + Hash + Sync,
-    S: BuildHasher + Sync,
+    T: Eq + AutoHash + Sync,
 {
     type Item = &'a T;
 
@@ -179,20 +177,19 @@ where
 
 /// Parallel iterator over shared references to elements in the union of sets.
 ///
-/// This iterator is created by the [`par_union`] method on [`HashSet`].
+/// This iterator is created by the [`par_union`] method on [`AutoHashSet`].
 /// See its documentation for more.
 ///
-/// [`par_union`]: /hashbrown/struct.HashSet.html#method.par_union
-/// [`HashSet`]: /hashbrown/struct.HashSet.html
-pub struct ParUnion<'a, T, S> {
-    a: &'a HashSet<T, S>,
-    b: &'a HashSet<T, S>,
+/// [`par_union`]: /autohash/struct.AutoHashSet.html#method.par_union
+/// [`AutoHashSet`]: /autohash/struct.AutoHashSet.html
+pub struct ParUnion<'a, T> {
+    a: &'a AutoHashSet<T>,
+    b: &'a AutoHashSet<T>,
 }
 
-impl<'a, T, S> ParallelIterator for ParUnion<'a, T, S>
+impl<'a, T> ParallelIterator for ParUnion<'a, T>
 where
-    T: Eq + Hash + Sync,
-    S: BuildHasher + Sync,
+    T: Eq + AutoHash + Sync,
 {
     type Item = &'a T;
 
@@ -207,15 +204,14 @@ where
     }
 }
 
-impl<T, S> HashSet<T, S>
+impl<T> AutoHashSet<T>
 where
-    T: Eq + Hash + Sync,
-    S: BuildHasher + Sync,
+    T: Eq + AutoHash + Sync,
 {
     /// Visits (potentially in parallel) the values representing the difference,
     /// i.e. the values that are in `self` but not in `other`.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn par_difference<'a>(&'a self, other: &'a Self) -> ParDifference<'a, T, S> {
+    pub fn par_difference<'a>(&'a self, other: &'a Self) -> ParDifference<'a, T> {
         ParDifference { a: self, b: other }
     }
 
@@ -225,21 +221,21 @@ where
     pub fn par_symmetric_difference<'a>(
         &'a self,
         other: &'a Self,
-    ) -> ParSymmetricDifference<'a, T, S> {
+    ) -> ParSymmetricDifference<'a, T> {
         ParSymmetricDifference { a: self, b: other }
     }
 
     /// Visits (potentially in parallel) the values representing the
     /// intersection, i.e. the values that are both in `self` and `other`.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn par_intersection<'a>(&'a self, other: &'a Self) -> ParIntersection<'a, T, S> {
+    pub fn par_intersection<'a>(&'a self, other: &'a Self) -> ParIntersection<'a, T> {
         ParIntersection { a: self, b: other }
     }
 
     /// Visits (potentially in parallel) the values representing the union,
     /// i.e. all the values in `self` or `other`, without duplicates.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn par_union<'a>(&'a self, other: &'a Self) -> ParUnion<'a, T, S> {
+    pub fn par_union<'a>(&'a self, other: &'a Self) -> ParUnion<'a, T> {
         ParUnion { a: self, b: other }
     }
 
@@ -280,22 +276,21 @@ where
     }
 }
 
-impl<T, S> HashSet<T, S>
+impl<T> AutoHashSet<T>
 where
-    T: Eq + Hash + Send,
-    S: BuildHasher + Send,
+    T: Eq + AutoHash + Send,
 {
     /// Consumes (potentially in parallel) all values in an arbitrary order,
     /// while preserving the set's allocated memory for reuse.
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn par_drain(&mut self) -> ParDrain<'_, T, S> {
+    pub fn par_drain(&mut self) -> ParDrain<'_, T> {
         ParDrain { set: self }
     }
 }
 
-impl<T: Send, S: Send> IntoParallelIterator for HashSet<T, S> {
+impl<T: Send> IntoParallelIterator for AutoHashSet<T> {
     type Item = T;
-    type Iter = IntoParIter<T, S>;
+    type Iter = IntoParIter<T>;
 
     #[cfg_attr(feature = "inline-more", inline)]
     fn into_par_iter(self) -> Self::Iter {
@@ -303,9 +298,9 @@ impl<T: Send, S: Send> IntoParallelIterator for HashSet<T, S> {
     }
 }
 
-impl<'a, T: Sync, S: Sync> IntoParallelIterator for &'a HashSet<T, S> {
+impl<'a, T: Sync> IntoParallelIterator for &'a AutoHashSet<T> {
     type Item = &'a T;
-    type Iter = ParIter<'a, T, S>;
+    type Iter = ParIter<'a, T>;
 
     #[cfg_attr(feature = "inline-more", inline)]
     fn into_par_iter(self) -> Self::Iter {
@@ -314,26 +309,24 @@ impl<'a, T: Sync, S: Sync> IntoParallelIterator for &'a HashSet<T, S> {
 }
 
 /// Collect values from a parallel iterator into a hashset.
-impl<T, S> FromParallelIterator<T> for HashSet<T, S>
+impl<T> FromParallelIterator<T> for AutoHashSet<T>
 where
-    T: Eq + Hash + Send,
-    S: BuildHasher + Default,
+    T: Eq + AutoHash + Send,
 {
     fn from_par_iter<P>(par_iter: P) -> Self
     where
         P: IntoParallelIterator<Item = T>,
     {
-        let mut set = HashSet::default();
+        let mut set = AutoHashSet::default();
         set.par_extend(par_iter);
         set
     }
 }
 
 /// Extend a hash set with items from a parallel iterator.
-impl<T, S> ParallelExtend<T> for HashSet<T, S>
+impl<T> ParallelExtend<T> for AutoHashSet<T>
 where
-    T: Eq + Hash + Send,
-    S: BuildHasher,
+    T: Eq + AutoHash + Send,
 {
     fn par_extend<I>(&mut self, par_iter: I)
     where
@@ -344,10 +337,9 @@ where
 }
 
 /// Extend a hash set with copied items from a parallel iterator.
-impl<'a, T, S> ParallelExtend<&'a T> for HashSet<T, S>
+impl<'a, T> ParallelExtend<&'a T> for AutoHashSet<T>
 where
-    T: 'a + Copy + Eq + Hash + Sync,
-    S: BuildHasher,
+    T: 'a + Copy + Eq + AutoHash + Sync,
 {
     fn par_extend<I>(&mut self, par_iter: I)
     where
@@ -358,12 +350,11 @@ where
 }
 
 // This is equal to the normal `HashSet` -- no custom advantage.
-fn extend<T, S, I>(set: &mut HashSet<T, S>, par_iter: I)
+fn extend<T, I>(set: &mut AutoHashSet<T>, par_iter: I)
 where
-    T: Eq + Hash,
-    S: BuildHasher,
+    T: Eq + AutoHash,
     I: IntoParallelIterator,
-    HashSet<T, S>: Extend<I::Item>,
+    AutoHashSet<T>: Extend<I::Item>,
 {
     let (list, len) = super::helpers::collect(par_iter);
 
