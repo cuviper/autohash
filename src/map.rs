@@ -200,6 +200,28 @@ pub(crate) fn entry_hash<K: AutoHash, V>(&(ref key, _): &(K, V)) -> u64 {
     key.get_hash()
 }
 
+/// Ensures that a single closure type across uses of this which, in turn prevents multiple
+/// instances of any functions like RawTable::reserve from being generated
+#[cfg_attr(feature = "inline-more", inline)]
+fn equivalent_key<Q, K, V>(k: &Q) -> impl Fn(&(K, V)) -> bool + '_
+where
+    K: Borrow<Q>,
+    Q: ?Sized + Eq,
+{
+    move |x| k.eq(x.0.borrow())
+}
+
+/// Ensures that a single closure type across uses of this which, in turn prevents multiple
+/// instances of any functions like RawTable::reserve from being generated
+#[cfg_attr(feature = "inline-more", inline)]
+fn equivalent<Q, K>(k: &Q) -> impl Fn(&K) -> bool + '_
+where
+    K: Borrow<Q>,
+    Q: ?Sized + Eq,
+{
+    move |x| k.eq(x.borrow())
+}
+
 impl<K, V> AutoHashMap<K, V> {
     /// Creates an empty `AutoHashMap`.
     ///
@@ -451,11 +473,8 @@ impl<K, V> AutoHashMap<K, V> {
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn drain(&mut self) -> Drain<'_, K, V> {
-        // Here we tie the lifetime of self to the iter.
-        unsafe {
-            Drain {
-                inner: self.table.drain(),
-            }
+        Drain {
+            inner: self.table.drain(),
         }
     }
 
@@ -663,7 +682,7 @@ where
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
         let hash = key.get_hash();
-        if let Some(elem) = self.table.find(hash, |q| q.0.eq(&key)) {
+        if let Some(elem) = self.table.find(hash, equivalent_key(&key)) {
             Entry::Occupied(OccupiedEntry {
                 hash,
                 key: Some(key),
@@ -705,8 +724,8 @@ where
         Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.get_key_value(k) {
-            Some((_, v)) => Some(v),
+        match self.get_inner(k) {
+            Some(&(_, ref v)) => Some(v),
             None => None,
         }
     }
@@ -737,13 +756,19 @@ where
         Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
-            Some(item) => unsafe {
-                let &(ref key, ref value) = item.as_ref();
-                Some((key, value))
-            },
+        match self.get_inner(k) {
+            Some(&(ref key, ref value)) => Some((key, value)),
             None => None,
         }
+    }
+
+    #[inline]
+    fn get_inner<Q: ?Sized>(&self, k: &Q) -> Option<&(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: AutoHash + Eq,
+    {
+        self.table.get(k.get_hash(), equivalent_key(k))
     }
 
     /// Returns the key-value pair corresponding to the supplied key, with a mutable reference to value.
@@ -776,11 +801,8 @@ where
         Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
-            Some(item) => unsafe {
-                let &mut (ref key, ref mut value) = item.as_mut();
-                Some((key, value))
-            },
+        match self.get_inner_mut(k) {
+            Some(&mut (ref key, ref mut value)) => Some((key, value)),
             None => None,
         }
     }
@@ -810,7 +832,7 @@ where
         K: Borrow<Q>,
         Q: AutoHash + Eq,
     {
-        self.get(k).is_some()
+        self.get_inner(k).is_some()
     }
 
     /// Returns a mutable reference to the value corresponding to the key.
@@ -841,10 +863,19 @@ where
         Q: AutoHash + Eq,
     {
         // Avoid `Option::map` because it bloats LLVM IR.
-        match self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
-            Some(item) => Some(unsafe { &mut item.as_mut().1 }),
+        match self.get_inner_mut(k) {
+            Some(&mut (_, ref mut v)) => Some(v),
             None => None,
         }
+    }
+
+    #[inline]
+    fn get_inner_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut (K, V)>
+    where
+        K: Borrow<Q>,
+        Q: AutoHash + Eq,
+    {
+        self.table.get_mut(k.get_hash(), equivalent_key(k))
     }
 
     /// Inserts a key-value pair into the map.
@@ -874,14 +905,12 @@ where
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-        unsafe {
-            let hash = k.get_hash();
-            if let Some(item) = self.table.find(hash, |x| k.eq(&x.0)) {
-                Some(mem::replace(&mut item.as_mut().1, v))
-            } else {
-                self.table.insert(hash, (k, v), entry_hash);
-                None
-            }
+        let hash = k.get_hash();
+        if let Some((_, item)) = self.table.get_mut(hash, equivalent_key(&k)) {
+            Some(mem::replace(item, v))
+        } else {
+            self.table.insert(hash, (k, v), entry_hash);
+            None
         }
     }
 
@@ -944,13 +973,8 @@ where
         K: Borrow<Q>,
         Q: AutoHash + Eq,
     {
-        unsafe {
-            if let Some(item) = self.table.find(k.get_hash(), |x| k.eq(x.0.borrow())) {
-                Some(self.table.remove(item))
-            } else {
-                None
-            }
-        }
+        let hash = k.get_hash();
+        self.table.remove_entry(hash, equivalent_key(k))
     }
 }
 
@@ -1404,7 +1428,7 @@ impl<'a, K, V> RawEntryBuilderMut<'a, K, V> {
         K: Borrow<Q>,
         Q: Eq,
     {
-        self.from_hash(hash, |q| q.borrow().eq(k))
+        self.from_hash(hash, equivalent(k))
     }
 
     /// Creates a `RawEntryMut` from the given hash.
@@ -1454,7 +1478,7 @@ impl<'a, K, V> RawEntryBuilder<'a, K, V> {
         K: Borrow<Q>,
         Q: Eq,
     {
-        self.from_hash(hash, |q| q.borrow().eq(k))
+        self.from_hash(hash, equivalent(k))
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
@@ -1462,11 +1486,8 @@ impl<'a, K, V> RawEntryBuilder<'a, K, V> {
     where
         F: FnMut(&K) -> bool,
     {
-        match self.map.table.find(hash, |(k, _)| is_match(k)) {
-            Some(item) => unsafe {
-                let &(ref key, ref value) = item.as_ref();
-                Some((key, value))
-            },
+        match self.map.table.get(hash, |(k, _)| is_match(k)) {
+            Some(&(ref key, ref value)) => Some((key, value)),
             None => None,
         }
     }
@@ -1824,11 +1845,10 @@ impl<'a, K, V> RawVacantEntryMut<'a, K, V> {
     where
         H: Fn(&K) -> u64,
     {
-        unsafe {
-            let elem = self.table.insert(hash, (key, value), |x| hasher(&x.0));
-            let &mut (ref mut k, ref mut v) = elem.as_mut();
-            (k, v)
-        }
+        let &mut (ref mut k, ref mut v) = self
+            .table
+            .insert_entry(hash, (key, value), |x| hasher(&x.0));
+        (k, v)
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
@@ -2810,8 +2830,13 @@ impl<'a, K, V> VacantEntry<'a, K, V> {
     where
         K: AutoHash,
     {
-        let bucket = self.table.table.insert(self.hash, (self.key, value), entry_hash);
-        unsafe { &mut bucket.as_mut().1 }
+        let table = &mut self.table.table;
+        let entry = table.insert_entry(
+            self.hash,
+            (self.key, value),
+            entry_hash,
+        );
+        &mut entry.1
     }
 
     #[cfg_attr(feature = "inline-more", inline)]
@@ -4297,7 +4322,7 @@ mod test_map {
                             assert!(removed.contains(&(i, 2 * i)), "{} not in {:?}", i, removed);
                             let e = m
                                 .table
-                                .insert(hash, (i, 2 * i), |x| super::make_hash(&hasher, &x.0));
+                                .insert(hash, (i, 2 * i), super::make_hasher(&hasher));
                             it.reflect_insert(&e);
                             if let Some(p) = removed.iter().position(|e| e == &(i, 2 * i)) {
                                 removed.swap_remove(p);

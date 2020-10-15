@@ -13,15 +13,16 @@ use hashbrown::HashMap;
 use paste::paste;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::BuildHasherDefault;
+use std::sync::atomic::{self, AtomicUsize};
 use test::{black_box, Bencher};
 
 const SIZE: usize = 1000;
 
-type AutoHashedMap<H> = AutoHashMap<AutoHashed<usize, H>, usize>;
-type MemoHashedMap<H> = AutoHashMap<MemoHashed<usize, H>, usize>;
-type UsizeHashMap = AutoHashMap<UsizeHash, usize>;
+type AutoHashedMap<H> = AutoHashMap<AutoHashed<usize, H>, DropType>;
+type MemoHashedMap<H> = AutoHashMap<MemoHashed<usize, H>, DropType>;
+type UsizeHashMap = AutoHashMap<UsizeHash, DropType>;
 
-type HashbrownMap<H> = HashMap<usize, usize, BuildHasherDefault<H>>;
+type HashbrownMap<H> = HashMap<usize, DropType, BuildHasherDefault<H>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct UsizeHash(usize);
@@ -61,6 +62,20 @@ impl Iterator for RandomKeys {
     }
 }
 
+// Just an arbitrary side effect to make the maps not shortcircuit to the non-dropping path
+// when dropping maps/entries (most real world usages likely have drop in the key or value)
+lazy_static::lazy_static! {
+    static ref SIDE_EFFECT: AtomicUsize = AtomicUsize::new(0);
+}
+
+#[derive(Clone)]
+struct DropType(usize);
+impl Drop for DropType {
+    fn drop(&mut self) {
+        SIDE_EFFECT.fetch_add(self.0, atomic::Ordering::SeqCst);
+    }
+}
+
 macro_rules! bench_suite {
     (@ $bench:ident, $name:ident, $map:ty) => {
         paste! {
@@ -89,10 +104,11 @@ macro_rules! insert_reserved {
             b.iter(|| {
                 m.clear();
                 for i in ($keydist).take(SIZE) {
-                    m.insert(i.into(), i);
+                    m.insert(i.into(), DropType(i));
                 }
                 black_box(&mut m);
-            })
+            });
+            eprintln!("{}", SIDE_EFFECT.load(atomic::Ordering::SeqCst));
         }
     };
 }
@@ -105,7 +121,7 @@ macro_rules! insert_unreserved {
             b.iter(|| {
                 let mut m: $maptype = Default::default();
                 for i in ($keydist).take(SIZE) {
-                    m.insert(i.into(), i);
+                    m.insert(i.into(), DropType(i));
                 }
                 black_box(m);
             })
@@ -120,7 +136,7 @@ macro_rules! insert_erase {
         fn $name(b: &mut Bencher) {
             let mut base: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                base.insert(i.into(), i);
+                base.insert(i.into(), DropType(i));
             }
             let skip = $keydist.skip(SIZE);
             b.iter(|| {
@@ -130,11 +146,12 @@ macro_rules! insert_erase {
                 // While keeping the size constant,
                 // replace the first keydist with the second.
                 for (add, remove) in (&mut add_iter).zip(&mut remove_iter).take(SIZE) {
-                    m.insert(add.into(), add);
+                    m.insert(add.into(), DropType(add));
                     black_box(m.remove(&remove.into()));
                 }
                 black_box(m);
-            })
+            });
+            eprintln!("{}", SIDE_EFFECT.load(atomic::Ordering::SeqCst));
         }
     };
 }
@@ -146,14 +163,15 @@ macro_rules! lookup_pass {
         fn $name(b: &mut Bencher) {
             let mut m: $maptype = Default::default();
             for i in $keydist.take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
                 for i in $keydist.take(SIZE) {
                     black_box(m.get(&i.into()));
                 }
-            })
+            });
+            eprintln!("{}", SIDE_EFFECT.load(atomic::Ordering::SeqCst));
         }
     };
 }
@@ -166,7 +184,7 @@ macro_rules! lookup_fail {
             let mut m: $maptype = Default::default();
             let mut iter = $keydist;
             for i in (&mut iter).take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -185,7 +203,7 @@ macro_rules! iter {
         fn $name(b: &mut Bencher) {
             let mut m: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -204,7 +222,7 @@ macro_rules! clone_small {
         fn $name(b: &mut Bencher) {
             let mut m: $maptype = Default::default();
             for i in ($keydist).take(10) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -222,7 +240,7 @@ macro_rules! clone_from_small {
             let mut m: $maptype = Default::default();
             let mut m2: $maptype = Default::default();
             for i in ($keydist).take(10) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -240,7 +258,7 @@ macro_rules! clone_large {
         fn $name(b: &mut Bencher) {
             let mut m: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -258,7 +276,7 @@ macro_rules! clone_from_large {
             let mut m: $maptype = Default::default();
             let mut m2: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
 
             b.iter(|| {
@@ -276,7 +294,7 @@ macro_rules! grow_shrink {
         fn $name(b: &mut Bencher) {
             let mut m: $maptype = Default::default();
             for i in ($keydist).take(SIZE) {
-                m.insert(i.into(), i);
+                m.insert(i.into(), DropType(i));
             }
             m.shrink_to_fit();
 

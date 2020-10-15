@@ -4,6 +4,7 @@ autohash
 <!-- [![Build Status](https://travis-ci.com/cuviper/autohash.svg?branch=master)](https://travis-ci.com/cuviper/autohash) -->
 [![Crates.io](https://img.shields.io/crates/v/autohash.svg)](https://crates.io/crates/autohash)
 [![Documentation](https://docs.rs/autohash/badge.svg)](https://docs.rs/autohash)
+[![Rust](https://img.shields.io/badge/rust-1.36.0%2B-blue.svg?maxAge=3600)](https://github.com/rust-lang/hashbrown)
 
 This crate provides `AutoHashMap` and `AutoHashSet` where the keys are
 self-hashed. The implementation is built on `RawTable` from [`hashbrown`].
